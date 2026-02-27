@@ -360,7 +360,7 @@ public class UtUtahScraperService
             record.Releases = SplitMultipleValues(releasesRaw);
         }
 
-        record.AbbvTaxingDesc = await GetLegalDescriptionAsync(table) ?? "";
+        record.AbbvTaxingDesc = await GetLegalDescriptionLinesAsync(table);
 
         return record;
     }
@@ -450,21 +450,26 @@ public class UtUtahScraperService
         return list;
     }
 
-    /// <summary>Abbv Taxing Desc*: extract value, remove "*Taxing description NOT FOR LEGAL DOCUMENTS", normalize whitespace.</summary>
-    async Task<string?> GetLegalDescriptionAsync(ILocator table)
+    /// <summary>Abbv Taxing Desc*: extract lines, remove warning line, each line becomes one list item.</summary>
+    async Task<List<string>> GetLegalDescriptionLinesAsync(ILocator table)
     {
+        var list = new List<string>();
         var valueCell = table.Locator("xpath=.//td[contains(., 'Abbv Taxing Desc')]/following-sibling::td[1]");
         var n = await valueCell.CountAsync();
-        if (n == 0) return null;
+        if (n == 0) return list;
         var text = await valueCell.First.InnerTextAsync();
-        if (string.IsNullOrWhiteSpace(text)) return null;
+        if (string.IsNullOrWhiteSpace(text)) return list;
         var cleaned = text
             .Replace("*Taxing description NOT FOR LEGAL DOCUMENTS", "", StringComparison.OrdinalIgnoreCase)
             .Replace("Taxing description NOT FOR LEGAL DOCUMENTS", "", StringComparison.OrdinalIgnoreCase)
             .Trim();
-        if (string.IsNullOrWhiteSpace(cleaned)) return null;
-        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"\s+", " ").Trim();
-        return cleaned;
+        if (string.IsNullOrWhiteSpace(cleaned)) return list;
+        foreach (var line in cleaned.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var s = System.Text.RegularExpressions.Regex.Replace(line.Trim(), @"\s+", " ");
+            if (!string.IsNullOrEmpty(s)) list.Add(s);
+        }
+        return list;
     }
 
     static string NormalizeDate(string value)

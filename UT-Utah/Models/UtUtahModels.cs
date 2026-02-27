@@ -48,7 +48,7 @@ public class DocumentRecord
     public List<string> Releases { get; set; } = new();
 
     [JsonPropertyName("Abbv Taxing Desc")]
-    public string AbbvTaxingDesc { get; set; } = "";
+    public List<string> AbbvTaxingDesc { get; set; } = new();
 
     [JsonPropertyName("PdfUrl")]
     public string PdfUrl { get; set; } = "";
