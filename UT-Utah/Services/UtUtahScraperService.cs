@@ -64,12 +64,12 @@ public class UtUtahScraperService
 
         // 2. Navigate to Utah County Recorder start URL
         await _page.GotoAsync(StartUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await _page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
         // 3. Click "Document Recording Search" link (href="RecordingsForm.asp")
         var docRecordingLink = _page.Locator($"a[href=\"{RecordingsFormPath}\"]").First;
         await docRecordingLink.ClickAsync();
-        await _page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
         // 4. Locate form#form2 (action="RecordingsDate.asp"), fill Start Date and End Date
         var form2 = _page.Locator($"#{Form2Id}");
@@ -85,7 +85,7 @@ public class UtUtahScraperService
         await submitBtn.ClickAsync();
 
         // 6. Wait for the search results page to load completely
-        await _page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
         // ——— Step 2: Pagination & Extracting Record Links ———
         var allDetailLinks = await PaginateAndCollectDetailLinksAsync();
@@ -107,7 +107,7 @@ public class UtUtahScraperService
             try
             {
                 await mainPage.GotoAsync(fullUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-                await mainPage.WaitForLoadStateAsync(LoadState.NetworkIdle);
+                await mainPage.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
                 await ExtractAndMapDetailPageAsync(mainPage, headers, names, legals, parcels, xrefs);
 
@@ -278,7 +278,7 @@ public class UtUtahScraperService
                 break;
 
             await nextLink.ClickAsync();
-            await _page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+            await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
         }
 
         return detailLinks;
