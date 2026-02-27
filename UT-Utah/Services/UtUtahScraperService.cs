@@ -298,8 +298,7 @@ public class UtUtahScraperService
 
     /// <summary>
     /// Step 4: Opens Document Image Viewer popup and handles the PDF download.
-    /// Resilient approach: Catches headless background downloads via Context,
-    /// or falls back to API request if opened in headed Chrome PDF viewer.
+    /// Streamlined for Apify Headless: Relies entirely on Download event, ignoring Popups.
     /// </summary>
     async Task TryDownloadPdfForDetailPageAsync(IPage page, string documentNumber, string recordingDate)
     {
@@ -311,10 +310,9 @@ public class UtUtahScraperService
         var fullPath = Path.Combine(dir, safeFileName);
 
         IPage? popup = null;
-        IPage? pdfViewerPage = null;
-
-        // Set up Context-level download listener (Catches headless downloads anywhere)
         var downloadTcs = new TaskCompletionSource<IDownload>();
+
+        // Listener to catch any download fired by the popup (Playwright .NET: Download is on Page, not Context)
         void OnDownload(object? sender, IDownload d) => downloadTcs.TrySetResult(d);
 
         try
@@ -340,68 +338,24 @@ public class UtUtahScraperService
             if (!await downloadLink.IsVisibleAsync())
                 downloadLink = popup.Locator("a:has-text('Download PDF')").First;
 
+            // Attach listener just before clicking (on popup; in .NET Download is on IPage)
             popup.Download += OnDownload;
 
-            var popupTask2 = popup.WaitForPopupAsync(new PageWaitForPopupOptions { Timeout = 15_000 });
-
+            // 4. Click download and wait strictly for the Download event (no Popup wait)
             await downloadLink.ClickAsync(new LocatorClickOptions { Timeout = 30_000 });
 
-            // 4. Race: Catch either the headless Download OR the headed Popup
-            var completed = await Task.WhenAny(downloadTcs.Task, popupTask2, Task.Delay(60_000));
+            // Wait up to 60 seconds for the download event to fire
+            var completed = await Task.WhenAny(downloadTcs.Task, Task.Delay(60_000));
 
             if (completed == downloadTcs.Task)
             {
-                // Headless mode triggered download directly
                 var download = await downloadTcs.Task;
                 await download.SaveAsAsync(fullPath);
-                Console.WriteLine($"[UtUtah] Saved PDF via Context Download: {fullPath}");
-            }
-            else if (completed == popupTask2)
-            {
-                pdfViewerPage = await popupTask2;
-
-                // Headless popup might still trigger a download slightly after opening
-                var popupDownload = await Task.WhenAny(downloadTcs.Task, Task.Delay(5_000));
-                if (popupDownload == downloadTcs.Task)
-                {
-                    var download = await downloadTcs.Task;
-                    await download.SaveAsAsync(fullPath);
-                    Console.WriteLine($"[UtUtah] Saved PDF via Context Download (post-popup): {fullPath}");
-                }
-                else
-                {
-                    // Headed mode: No download fired, it's displaying in Chrome PDF Viewer
-                    var pdfUrl = pdfViewerPage.Url;
-                    for (int i = 0; i < 15 && (string.IsNullOrEmpty(pdfUrl) || pdfUrl == "about:blank" || pdfUrl == ":"); i++)
-                    {
-                        await Task.Delay(1000);
-                        pdfUrl = pdfViewerPage.Url;
-                    }
-
-                    if (!string.IsNullOrEmpty(pdfUrl) && pdfUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Console.WriteLine($"[UtUtah] Fetching PDF directly from URL: {pdfUrl}");
-                        var response = await _context!.APIRequest.GetAsync(pdfUrl, new APIRequestContextOptions { Timeout = 60_000 });
-                        if (response.Ok)
-                        {
-                            var pdfBytes = await response.BodyAsync();
-                            await File.WriteAllBytesAsync(fullPath, pdfBytes);
-                            Console.WriteLine($"[UtUtah] Saved PDF via API fallback: {fullPath}");
-                        }
-                        else
-                        {
-                            Console.WriteLine($"[UtUtah] API failed. Status: {response.Status} for DocID {docId}");
-                        }
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[UtUtah] PDF download failed. Invalid URL caught: {pdfUrl}");
-                    }
-                }
+                Console.WriteLine($"[UtUtah] Successfully saved PDF via Context Download: {fullPath}");
             }
             else
             {
-                Console.WriteLine($"[UtUtah] PDF download timeout for DocID {docId}");
+                Console.WriteLine($"[UtUtah] PDF download timeout. No download event fired for DocID {docId}");
             }
         }
         catch (Exception ex)
@@ -411,7 +365,6 @@ public class UtUtahScraperService
         finally
         {
             if (popup != null) popup.Download -= OnDownload;
-            if (pdfViewerPage != null) try { await pdfViewerPage.CloseAsync(); } catch { }
             if (popup != null) try { await popup.CloseAsync(); } catch { }
         }
     }
