@@ -99,34 +99,17 @@ public class UtUtahScraperService
             {
                 await detailPage.GotoAsync(fullUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-                var headers = new List<HeaderModel>();
-                var names = new List<NameModel>();
-                var legals = new List<LegalModel>();
-                var parcels = new List<ParcelModel>();
-                var xrefs = new List<XrefModel>();
+                var record = await ExtractAndMapDetailPageAsync(detailPage);
 
-                await ExtractAndMapDetailPageAsync(detailPage, headers, names, legals, parcels, xrefs);
-
-                var header = headers.FirstOrDefault();
-                if (header != null)
+                if (!string.IsNullOrEmpty(record.EntryNumber))
                 {
-                    var pdfUrl = await TryDownloadPdfForDetailPageAsync(detailPage, header.DocumentNumber, header.RecordingDate);
-
-                    var record = new DocumentRecord
-                    {
-                        Header = header,
-                        Names = names,
-                        Legals = legals,
-                        Parcels = parcels,
-                        Xrefs = xrefs,
-                        PdfUrl = pdfUrl ?? ""
-                    };
+                    var pdfUrl = await TryDownloadPdfForDetailPageAsync(detailPage, record.EntryNumber, record.Recorded);
+                    record.PdfUrl = pdfUrl ?? "";
 
                     await ApifyHelper.PushSingleDataAsync(record);
-                    Console.WriteLine($"[UtUtah] Pushed data and PDF ({pdfUrl}) for DocID {header.DocID} to Dataset.");
+                    Console.WriteLine($"[UtUtah] Pushed data for {record.EntryNumber} to Dataset.");
 
-                    // Checkpoint: save last processed date for resume
-                    if (DateTime.TryParse(header.RecordingDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out var recordDate))
+                    if (DateTime.TryParse(record.Recorded, CultureInfo.InvariantCulture, DateTimeStyles.None, out var recordDate))
                     {
                         try
                         {
@@ -324,91 +307,62 @@ public class UtUtahScraperService
     }
 
     /// <summary>
-    /// Step 3: Extract data from Document Detail page and append to the five model lists.
+    /// Step 3: Extract data from Document Detail page into the flat DocumentRecord format.
     /// </summary>
-    async Task ExtractAndMapDetailPageAsync(IPage page, List<HeaderModel> headers, List<NameModel> names, List<LegalModel> legals, List<ParcelModel> parcels, List<XrefModel> xrefs)
+    async Task<DocumentRecord> ExtractAndMapDetailPageAsync(IPage page)
     {
         var table = page.Locator("table[width=\"80%\"]").First;
         await table.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
 
+        var record = new DocumentRecord();
+
         var docId = await GetValueByLabelAsync(table, "Entry #:");
         if (string.IsNullOrWhiteSpace(docId)) docId = await GetValueByLabelAsync(table, "Entry #");
-        docId = docId?.Trim() ?? "";
-        if (string.IsNullOrEmpty(docId)) return;
+        record.EntryNumber = docId?.Trim() ?? "";
 
-        var countyId = CountyId;
+        record.Recorded = (await GetValueByLabelAsync(table, "Recorded:")) ?? "";
 
-        // HeaderModel
-        var recordingDate = await GetValueByLabelAsync(table, "Recorded:");
+        var book = await GetValueByLabelAsync(table, "Book:");
+        if (string.IsNullOrEmpty(book)) book = await GetValueByLabelAsync(table, "Book #:");
+        if (string.IsNullOrEmpty(book)) book = ExtractValueFromSameCell(await GetLabelCellTextAsync(table, "Book:"));
+        record.Book = book ?? "";
+
         var pageNumber = await GetValueByLabelAsync(table, "Pages:");
         if (string.IsNullOrEmpty(pageNumber)) pageNumber = ExtractValueFromSameCell(await GetLabelCellTextAsync(table, "Pages:"));
-        var documentDate = await GetValueByLabelAsync(table, "Instrument Date:");
+        record.Page = pageNumber ?? "";
+
+        record.InstrumentDate = (await GetValueByLabelAsync(table, "Instrument Date:")) ?? "";
+
         var amount = await GetValueByLabelAsync(table, "Consideration:");
         if (string.IsNullOrEmpty(amount)) amount = ExtractValueFromSameCell(await GetLabelCellTextAsync(table, "Consideration:"));
-        var documentType = await GetValueByLabelAsync(table, "Kind of Inst:");
-        var feesRemarks = await GetValueByLabelAsync(table, "Fees:");
-        if (string.IsNullOrEmpty(feesRemarks)) feesRemarks = ExtractValueFromSameCell(await GetLabelCellTextAsync(table, "Fees:"));
-        var mailAddress = (await GetValueByLabelAsync(table, "Mail Address:") ?? "").TrimEnd();
+        record.Consideration = amount ?? "";
+
+        record.KindOfInst = (await GetValueByLabelAsync(table, "Kind of Inst:")) ?? "";
+
+        record.MailAddress = (await GetValueByLabelAsync(table, "Mail Address:") ?? "").TrimEnd();
+
         var rawTaxAddress = await GetValueByLabelAsync(table, "Tax Address:") ?? "";
-        var taxAddress = System.Text.RegularExpressions.Regex.Replace(rawTaxAddress, @"\s+", " ").Trim();
+        record.TaxAddress = System.Text.RegularExpressions.Regex.Replace(rawTaxAddress, @"\s+", " ").Trim();
 
-        headers.Add(new HeaderModel
-        {
-            CountyID = countyId,
-            DocID = docId,
-            DocumentNumber = docId,
-            RecordingDate = recordingDate ?? "",
-            PageNumber = pageNumber ?? "",
-            DocumentDate = documentDate ?? "",
-            Amount = amount ?? "",
-            DocumentType = documentType ?? "",
-            Remarks = feesRemarks ?? "",
-            MailAddress = mailAddress ?? "",
-            TaxAddress = taxAddress ?? ""
-        });
+        record.Grantors = await GetLinkTextsByLabelAsync(table, "Grantor(s):");
+        record.Grantees = await GetLinkTextsByLabelAsync(table, "Grantee(s):");
+        record.SerialNumbers = await GetSerialNumbersAsync(table);
 
-        // NameModel: Grantor(s) = PartyType "1", Grantee(s) = PartyType "2", Sequence increment
-        var sequence = 0;
-        var grantors = await GetLinkTextsByLabelAsync(table, "Grantor(s):");
-        foreach (var name in grantors)
-        {
-            sequence++;
-            names.Add(new NameModel { CountyID = countyId, DocID = docId, PartyType = "1", PartyName = name, Sequence = sequence.ToString() });
-        }
-        var grantees = await GetLinkTextsByLabelAsync(table, "Grantee(s):");
-        foreach (var name in grantees)
-        {
-            sequence++;
-            names.Add(new NameModel { CountyID = countyId, DocID = docId, PartyType = "2", PartyName = name, Sequence = sequence.ToString() });
-        }
-
-        // ParcelModel: Serial Number(s)
-        var serialNumbers = await GetSerialNumbersAsync(table);
-        foreach (var parcelNum in serialNumbers)
-        {
-            parcels.Add(new ParcelModel { CountyID = countyId, DocID = docId, ParcelNumber = parcelNum, TaxAccountNumber = "" });
-        }
-
-        // XrefModel: Tie Entry(s) and Releases
         var tieEntries = await GetValueByLabelAsync(table, "Tie Entry(s):");
-        var releases = await GetValueByLabelAsync(table, "Releases:");
-        foreach (var xrefNum in SplitMultipleValues(tieEntries))
+        record.TieEntries = SplitMultipleValues(tieEntries);
+
+        var releasesLinks = await GetLinkTextsByLabelAsync(table, "Releases:");
+        if (releasesLinks.Count > 0)
+            record.Releases = releasesLinks;
+        else
         {
-            if (string.IsNullOrWhiteSpace(xrefNum)) continue;
-            xrefs.Add(new XrefModel { CountyID = countyId, DocID = docId, XrefDocumentNumber = xrefNum.Trim() });
-        }
-        foreach (var xrefNum in SplitMultipleValues(releases))
-        {
-            if (string.IsNullOrWhiteSpace(xrefNum)) continue;
-            xrefs.Add(new XrefModel { CountyID = countyId, DocID = docId, XrefDocumentNumber = xrefNum.Trim() });
+            var releasesRaw = await GetValueByLabelAsync(table, "Releases:");
+            record.Releases = SplitMultipleValues(releasesRaw);
         }
 
-        // LegalModel: Abbv Taxing Desc* — strip warning note
-        var legalDesc = await GetLegalDescriptionAsync(table);
-        if (!string.IsNullOrWhiteSpace(legalDesc))
-        {
-            legals.Add(new LegalModel { CountyID = countyId, DocID = docId, LegalDescription = legalDesc });
-        }
+        record.AbbvTaxingDesc = await GetLegalDescriptionAsync(table) ?? "";
+
+        return record;
     }
 
     /// <summary>Finds td containing label text, returns the following-sibling td[1] text; otherwise empty.</summary>
@@ -496,7 +450,7 @@ public class UtUtahScraperService
         return list;
     }
 
-    /// <summary>Abbv Taxing Desc*: extract value and remove "*Taxing description NOT FOR LEGAL DOCUMENTS".</summary>
+    /// <summary>Abbv Taxing Desc*: extract value, remove "*Taxing description NOT FOR LEGAL DOCUMENTS", normalize whitespace.</summary>
     async Task<string?> GetLegalDescriptionAsync(ILocator table)
     {
         var valueCell = table.Locator("xpath=.//td[contains(., 'Abbv Taxing Desc')]/following-sibling::td[1]");
@@ -508,7 +462,9 @@ public class UtUtahScraperService
             .Replace("*Taxing description NOT FOR LEGAL DOCUMENTS", "", StringComparison.OrdinalIgnoreCase)
             .Replace("Taxing description NOT FOR LEGAL DOCUMENTS", "", StringComparison.OrdinalIgnoreCase)
             .Trim();
-        return string.IsNullOrWhiteSpace(cleaned) ? null : cleaned;
+        if (string.IsNullOrWhiteSpace(cleaned)) return null;
+        cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, @"\s+", " ").Trim();
+        return cleaned;
     }
 
     static string NormalizeDate(string value)
