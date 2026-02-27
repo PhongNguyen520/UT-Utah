@@ -1,8 +1,5 @@
 using System.Globalization;
 using System.IO;
-using System.IO.Compression;
-using CsvHelper;
-using CsvHelper.Configuration;
 using Microsoft.Playwright;
 using UT_Utah.Models;
 
@@ -10,7 +7,7 @@ namespace UT_Utah.Services;
 
 /// <summary>
 /// Playwright-based scraper for Utah County Recorder.
-/// Exports data into 5 CSV files: Header, Legal, Parcel, Name, Xref.
+/// Pushes each document as a DocumentRecord (JSON) to the Apify Dataset; PDFs go to Key-Value Store.
 /// </summary>
 public class UtUtahScraperService
 {
@@ -91,18 +88,10 @@ public class UtUtahScraperService
         var allDetailLinks = await PaginateAndCollectDetailLinksAsync();
         Console.WriteLine($"[UtUtah] Total detail links collected: {allDetailLinks.Count}");
 
-        // ——— Step 3: Scraping Data & Mapping ———
-        var headers = new List<HeaderModel>();
-        var names = new List<NameModel>();
-        var legals = new List<LegalModel>();
-        var parcels = new List<ParcelModel>();
-        var xrefs = new List<XrefModel>();
-
-        foreach (var relativeUrl in allDetailLinks.Take(10))
+        // ——— Step 3: For each detail link, scrape one document, upload PDF to KV, push DocumentRecord to Dataset ———
+        foreach (var relativeUrl in allDetailLinks)
         {
             var fullUrl = ResolveDetailUrl(relativeUrl);
-
-            // Create a brand new isolated page for every record
             var detailPage = await _context!.NewPageAsync();
             detailPage.SetDefaultTimeout(60_000);
 
@@ -110,12 +99,44 @@ public class UtUtahScraperService
             {
                 await detailPage.GotoAsync(fullUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
+                var headers = new List<HeaderModel>();
+                var names = new List<NameModel>();
+                var legals = new List<LegalModel>();
+                var parcels = new List<ParcelModel>();
+                var xrefs = new List<XrefModel>();
+
                 await ExtractAndMapDetailPageAsync(detailPage, headers, names, legals, parcels, xrefs);
 
-                var lastHeader = headers.Count > 0 ? headers[^1] : null;
-                if (lastHeader != null)
+                var header = headers.FirstOrDefault();
+                if (header != null)
                 {
-                    await TryDownloadPdfForDetailPageAsync(detailPage, lastHeader.DocumentNumber, lastHeader.RecordingDate);
+                    var pdfUrl = await TryDownloadPdfForDetailPageAsync(detailPage, header.DocumentNumber, header.RecordingDate);
+
+                    var record = new DocumentRecord
+                    {
+                        Header = header,
+                        Names = names,
+                        Legals = legals,
+                        Parcels = parcels,
+                        Xrefs = xrefs,
+                        PdfUrl = pdfUrl ?? ""
+                    };
+
+                    await ApifyHelper.PushSingleDataAsync(record);
+                    Console.WriteLine($"[UtUtah] Pushed data and PDF ({pdfUrl}) for DocID {header.DocID} to Dataset.");
+
+                    // Checkpoint: save last processed date for resume
+                    if (DateTime.TryParse(header.RecordingDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out var recordDate))
+                    {
+                        try
+                        {
+                            await ApifyHelper.SetValueAsync("STATE", new StateModel { LastProcessedDate = recordDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) });
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[UtUtah] State save failed: {ex.Message}");
+                        }
+                    }
                 }
             }
             catch (Exception ex) when (ex.Message.Contains("has been closed", StringComparison.OrdinalIgnoreCase))
@@ -126,120 +147,13 @@ public class UtUtahScraperService
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[UtUtah] Error scraping detail page {fullUrl}: {ex.Message}");
+                Console.WriteLine($"[UtUtah] Error processing detail page {fullUrl}: {ex.Message}");
             }
             finally
             {
                 try { await detailPage.CloseAsync(); } catch { }
             }
         }
-
-        Console.WriteLine($"[UtUtah] Step 3+4 done. Header={headers.Count}, Name={names.Count}, Legal={legals.Count}, Parcel={parcels.Count}, Xref={xrefs.Count}");
-
-        // Step 5: Export CSVs, zip by date, cleanup, (optional) push to Apify
-        await ExportAndZipDataAsync(headers, names, legals, parcels, xrefs);
-    }
-
-    /// <summary>
-    /// Step 5: Groups data by RecordingDate, writes 5 CSVs per date into a temp folder,
-    /// zips to Output/Data/{YYYY}/UT-Utah_{yyyy-MM-dd}.zip, then deletes the temp folder.
-    /// </summary>
-    async Task ExportAndZipDataAsync(
-        List<HeaderModel> headers,
-        List<NameModel> names,
-        List<LegalModel> legals,
-        List<ParcelModel> parcels,
-        List<XrefModel> xrefs)
-    {
-        if (headers.Count == 0)
-        {
-            Console.WriteLine("[UtUtah] No headers to export; skipping Step 5.");
-            return;
-        }
-
-        // 1. Group headers by normalized RecordingDate (yyyy-MM-dd)
-        var dateGroups = headers
-            .Select(h => new { Header = h, DateKey = TryParseRecordingDateKey(h.RecordingDate) })
-            .Where(x => x.DateKey != null)
-            .GroupBy(x => x.DateKey!, StringComparer.Ordinal)
-            .ToList();
-
-        foreach (var group in dateGroups)
-        {
-            var dateKey = group.Key; // e.g. "2026-02-26"
-            var year = dateKey.Length >= 4 ? dateKey[..4] : DateTime.Now.Year.ToString();
-            var docIdsForDate = new HashSet<string>(group.Select(x => x.Header.DocID), StringComparer.OrdinalIgnoreCase);
-
-            // 2. Filter child lists by DocID
-            var namesForDate = names.Where(n => docIdsForDate.Contains(n.DocID)).ToList();
-            var legalsForDate = legals.Where(l => docIdsForDate.Contains(l.DocID)).ToList();
-            var parcelsForDate = parcels.Where(p => docIdsForDate.Contains(p.DocID)).ToList();
-            var xrefsForDate = xrefs.Where(x => docIdsForDate.Contains(x.DocID)).ToList();
-
-            // 3. Temp folder and CSVs
-            var tempDir = Path.Combine("Output", $"Temp_{dateKey}");
-            Directory.CreateDirectory(tempDir);
-
-            var csvConfig = new CsvConfiguration(CultureInfo.InvariantCulture);
-
-            await WriteCsvAsync(Path.Combine(tempDir, "Header.csv"), group.Select(x => x.Header), csvConfig);
-            await WriteCsvAsync(Path.Combine(tempDir, "Names.csv"), namesForDate, csvConfig);
-            await WriteCsvAsync(Path.Combine(tempDir, "Legals.csv"), legalsForDate, csvConfig);
-            await WriteCsvAsync(Path.Combine(tempDir, "Parcels.csv"), parcelsForDate, csvConfig);
-            await WriteCsvAsync(Path.Combine(tempDir, "Xref.csv"), xrefsForDate, csvConfig);
-
-            // 4. Zip: Output/Data/{YYYY}/UT-Utah_{yyyy-MM-dd}.zip
-            var dataDir = Path.Combine("Output", "Data", year);
-            Directory.CreateDirectory(dataDir);
-            var zipPath = Path.Combine(dataDir, $"UT-Utah_{dateKey}.zip");
-            if (File.Exists(zipPath))
-                File.Delete(zipPath);
-            ZipFile.CreateFromDirectory(tempDir, zipPath);
-            Console.WriteLine($"[UtUtah] Created zip: {zipPath}");
-
-            // 5. Cleanup temp folder
-            Directory.Delete(tempDir, recursive: true);
-
-            // 6. Apify: upload zip to Key-Value store (key = filename without extension)
-            var zipKey = $"UT-Utah_{dateKey}";
-            try
-            {
-                var zipBytes = await File.ReadAllBytesAsync(zipPath);
-                await ApifyHelper.SaveKeyValueRecordAsync(zipKey, zipBytes, "application/zip");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[UtUtah] Key-Value store upload failed for {zipKey}: {ex.Message}");
-            }
-
-            // 7. Update checkpoint state for this date (so we can resume later)
-            try
-            {
-                await ApifyHelper.SetValueAsync("STATE", new StateModel { LastProcessedDate = dateKey });
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[UtUtah] State save failed for date {dateKey}: {ex.Message}");
-            }
-        }
-    }
-
-    /// <summary>
-    /// Parses RecordingDate (e.g. MM/DD/YYYY) to a date key "yyyy-MM-dd", or null if invalid.
-    /// </summary>
-    static string? TryParseRecordingDateKey(string? recordingDate)
-    {
-        if (string.IsNullOrWhiteSpace(recordingDate)) return null;
-        if (DateTime.TryParse(recordingDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
-            return dt.ToString("yyyy-MM-dd");
-        return null;
-    }
-
-    static async Task WriteCsvAsync<T>(string filePath, IEnumerable<T> records, CsvConfiguration config)
-    {
-        await using var writer = new StreamWriter(filePath);
-        await using var csv = new CsvWriter(writer, config);
-        await csv.WriteRecordsAsync(records);
     }
 
     /// <summary>
@@ -305,10 +219,10 @@ public class UtUtahScraperService
     const int DownloadTimeoutMs = 60_000;
 
     /// <summary>
-    /// Step 4: Opens Document Image Viewer popup and handles the PDF download.
-    /// Runs inside a fresh, isolated Page for every record to prevent state-leakage timeouts.
+    /// Step 4: Opens Document Image Viewer popup, downloads PDF, uploads to Apify Key-Value Store.
+    /// Returns the public URL of the PDF in the KV store (or local path when not on Apify). Returns null on failure.
     /// </summary>
-    async Task TryDownloadPdfForDetailPageAsync(IPage detailPage, string documentNumber, string recordingDate)
+    async Task<string?> TryDownloadPdfForDetailPageAsync(IPage detailPage, string documentNumber, string recordingDate)
     {
         var docId = documentNumber;
         var (year, month) = ParseRecordingDateForPath(recordingDate);
@@ -320,12 +234,12 @@ public class UtUtahScraperService
         IPage? popup = null;
         var downloadTcs = new TaskCompletionSource<IDownload>();
         void OnDownload(object? sender, IDownload d) => downloadTcs.TrySetResult(d);
+        string? pdfPublicUrl = null;
 
         try
         {
             detailPage.Download += OnDownload;
 
-            // 1. Open BMI Web Viewer popup
             var popupTask = detailPage.WaitForPopupAsync(new PageWaitForPopupOptions { Timeout = 45_000 });
             await detailPage.Locator("input[value=\"Document Image Viewer\"]").First.ClickAsync(new LocatorClickOptions { Timeout = 30_000 });
             popup = await popupTask;
@@ -335,12 +249,10 @@ public class UtUtahScraperService
 
             await popup.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
-            // Wait for document image so KnockoutJS bindings are active
             var firstDocImage = popup.Locator("img.lt-image").First;
             await firstDocImage.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 60_000 });
             await Task.Delay(2000);
 
-            // 2. Open Hamburger menu
             var toolbar = popup.Locator("#Toolbar").First;
             await toolbar.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 30_000 });
 
@@ -348,12 +260,10 @@ public class UtUtahScraperService
             await menuToggle.ClickAsync();
             await Task.Delay(1500);
 
-            // 3. Prepare to click "Download PDF"
             var downloadLink = popup.Locator("a[data-bind*=\"showPdf\"]").First;
             if (!await downloadLink.IsVisibleAsync())
                 downloadLink = popup.Locator("a:has-text('Download PDF')").First;
 
-            // 4. Click download and wait
             Console.WriteLine($"[UtUtah] Triggering download for {docId}...");
             await downloadLink.ClickAsync(new LocatorClickOptions { Timeout = 30_000 });
 
@@ -364,6 +274,11 @@ public class UtUtahScraperService
                 var download = await downloadTcs.Task;
                 await download.SaveAsAsync(fullPath);
                 Console.WriteLine($"[UtUtah] Successfully saved PDF: {fullPath}");
+
+                var pdfBytes = await File.ReadAllBytesAsync(fullPath);
+                var kvKey = SanitizeFileName(docId) + ".pdf";
+                await ApifyHelper.SaveKeyValueRecordAsync(kvKey, pdfBytes, "application/pdf");
+                pdfPublicUrl = ApifyHelper.GetRecordUrl(kvKey);
             }
             else
             {
@@ -380,6 +295,8 @@ public class UtUtahScraperService
             if (popup != null) popup.Download -= OnDownload;
             if (popup != null) try { await popup.CloseAsync(); } catch { }
         }
+
+        return pdfPublicUrl;
     }
 
     /// <summary>Parses RecordingDate (e.g. "2/25/2026 9:46:02 AM") to (YYYY, MM) for path.</summary>

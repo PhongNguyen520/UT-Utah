@@ -79,3 +79,18 @@ public class XrefModel
     public string XrefPageNumber { get; set; } = "";
     public string XrefDocumentNumber_2 { get; set; } = "";
 }
+
+/// <summary>
+/// Root record for a single document: header, related rows, and public URL of the PDF in Apify Key-Value Store.
+/// Pushed as one JSON object per document to the Apify Dataset.
+/// </summary>
+public class DocumentRecord
+{
+    public HeaderModel Header { get; set; } = new();
+    public List<NameModel> Names { get; set; } = new();
+    public List<LegalModel> Legals { get; set; } = new();
+    public List<ParcelModel> Parcels { get; set; } = new();
+    public List<XrefModel> Xrefs { get; set; } = new();
+    /// <summary>Public URL of the PDF in Apify Key-Value Store (or local path when running locally).</summary>
+    public string PdfUrl { get; set; } = "";
+}
