@@ -298,7 +298,7 @@ public class UtUtahScraperService
 
     /// <summary>
     /// Step 4: Opens Document Image Viewer popup and handles the PDF download.
-    /// Streamlined for Apify Headless: Relies entirely on Download event, ignoring Popups.
+    /// Listens for Download on both detail page and popup so we catch it regardless of which page Chromium assigns it to (fixes 2nd+ record on Apify).
     /// </summary>
     async Task TryDownloadPdfForDetailPageAsync(IPage page, string documentNumber, string recordingDate)
     {
@@ -312,7 +312,6 @@ public class UtUtahScraperService
         IPage? popup = null;
         var downloadTcs = new TaskCompletionSource<IDownload>();
 
-        // Listener to catch any download fired by the popup (Playwright .NET: Download is on Page, not Context)
         void OnDownload(object? sender, IDownload d) => downloadTcs.TrySetResult(d);
 
         try
@@ -338,20 +337,20 @@ public class UtUtahScraperService
             if (!await downloadLink.IsVisibleAsync())
                 downloadLink = popup.Locator("a:has-text('Download PDF')").First;
 
-            // Attach listener just before clicking (on popup; in .NET Download is on IPage)
+            // Attach on BOTH detail page and popup: Chromium may fire Download on either after the first record
+            page.Download += OnDownload;
             popup.Download += OnDownload;
 
-            // 4. Click download and wait strictly for the Download event (no Popup wait)
+            // 4. Click and wait for Download event
             await downloadLink.ClickAsync(new LocatorClickOptions { Timeout = 30_000 });
 
-            // Wait up to 60 seconds for the download event to fire
             var completed = await Task.WhenAny(downloadTcs.Task, Task.Delay(60_000));
 
             if (completed == downloadTcs.Task)
             {
                 var download = await downloadTcs.Task;
                 await download.SaveAsAsync(fullPath);
-                Console.WriteLine($"[UtUtah] Successfully saved PDF via Context Download: {fullPath}");
+                Console.WriteLine($"[UtUtah] Successfully saved PDF via Download event: {fullPath}");
             }
             else
             {
@@ -364,6 +363,7 @@ public class UtUtahScraperService
         }
         finally
         {
+            page.Download -= OnDownload;
             if (popup != null) popup.Download -= OnDownload;
             if (popup != null) try { await popup.CloseAsync(); } catch { }
         }
