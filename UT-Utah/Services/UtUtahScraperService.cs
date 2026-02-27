@@ -297,8 +297,8 @@ public class UtUtahScraperService
     const int DownloadTimeoutMs = 60_000;
 
     /// <summary>
-    /// Step 4: Opens Document Image Viewer popup, downloads PDF to Output/PDFs/YYYY/MM/[DocumentNumber].pdf.
-    /// Fetches the PDF directly via API request from the new tab's URL to avoid Chrome PDF viewer UI issues.
+    /// Step 4: Opens Document Image Viewer popup, extracts PDF URL, and downloads it via API.
+    /// Optimized for Apify: Bypasses DOM events on PDF streams to prevent 30s timeouts.
     /// </summary>
     async Task TryDownloadPdfForDetailPageAsync(IPage page, string documentNumber, string recordingDate)
     {
@@ -315,39 +315,45 @@ public class UtUtahScraperService
         try
         {
             // 1. Open BMI Web Viewer popup
-            var popupTask = page.WaitForPopupAsync(new PageWaitForPopupOptions { Timeout = PopupTimeoutMs });
-            await page.Locator("input[value=\"Document Image Viewer\"]").First.ClickAsync();
+            var popupTask = page.WaitForPopupAsync(new PageWaitForPopupOptions { Timeout = 60_000 });
+            await page.Locator("input[value=\"Document Image Viewer\"]").First.ClickAsync(new LocatorClickOptions { Timeout = 30_000 });
             popup = await popupTask;
-            popup.SetDefaultTimeout(DownloadTimeoutMs);
+            popup.SetDefaultTimeout(60_000);
 
-            // Use DOMContentLoaded: BMI viewer keeps background requests, so NetworkIdle never fires on Apify/cloud
+            // Wait for viewer HTML to load
             await popup.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
             // 2. Open Hamburger menu
             var toolbar = popup.Locator("#Toolbar").First;
-            await toolbar.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15_000 });
+            await toolbar.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 30_000 });
 
             var menuToggle = popup.Locator("#Toolbar a.dropdown-toggle[data-toggle=\"dropdown\"]").First;
             await menuToggle.ClickAsync();
-            await Task.Delay(500); // Give menu time to animate
+            await Task.Delay(1000); // Give menu time to animate on slow containers
 
             // 3. Click "Download PDF" and catch the new tab
-            var pdfViewerTask = popup.WaitForPopupAsync(new PageWaitForPopupOptions { Timeout = 20_000 });
+            var pdfViewerTask = popup.WaitForPopupAsync(new PageWaitForPopupOptions { Timeout = 60_000 });
             var downloadLink = popup.Locator("a[data-bind*=\"showPdf\"]").First;
             if (!await downloadLink.IsVisibleAsync())
                 downloadLink = popup.Locator("a:has-text('Download PDF')").First;
 
-            await downloadLink.ClickAsync();
+            await downloadLink.ClickAsync(new LocatorClickOptions { Timeout = 30_000 });
             pdfViewerPage = await pdfViewerTask;
 
-            // 4. Download PDF directly via URL (shares browser context/cookies)
-            await pdfViewerPage.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-            var pdfUrl = pdfViewerPage.Url;
+            // 4. Safely get the PDF URL without waiting for DOMContentLoaded
+            for (int i = 0; i < 30; i++) // Poll for up to 30 seconds
+            {
+                if (!string.IsNullOrEmpty(pdfViewerPage.Url) && pdfViewerPage.Url != "about:blank")
+                    break;
+                await Task.Delay(1000);
+            }
 
+            var pdfUrl = pdfViewerPage.Url;
             Console.WriteLine($"[UtUtah] Fetching PDF directly from URL: {pdfUrl}");
 
+            // 5. Download the PDF bytes
             var apiContext = _context!.APIRequest;
-            var response = await apiContext.GetAsync(pdfUrl, new APIRequestContextOptions { Timeout = DownloadTimeoutMs });
+            var response = await apiContext.GetAsync(pdfUrl, new APIRequestContextOptions { Timeout = 60_000 });
 
             if (response.Ok)
             {
