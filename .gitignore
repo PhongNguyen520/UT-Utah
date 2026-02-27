@@ -1,0 +1,28 @@
+# Build
+[Bb]in/
+[Dd]ebug/
+[Rr]elease/
+obj/
+*.dll
+*.pdb
+*.exe
+
+# Output (PDFs, zips, CSVs)
+Output/
+
+# Apify local storage
+apify_storage/
+
+# Playwright
+.playwright/
+
+# IDE
+.vs/
+*.user
+*.suo
+*.userosscache
+.idea/
+*.sln.docstates
+
+# Logs
+*.log

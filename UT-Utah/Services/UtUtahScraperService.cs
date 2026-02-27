@@ -98,7 +98,7 @@ public class UtUtahScraperService
         var parcels = new List<ParcelModel>();
         var xrefs = new List<XrefModel>();
 
-        foreach (var relativeUrl in allDetailLinks)
+        foreach (var relativeUrl in allDetailLinks.Take(10)) // Limit to 10 records for testing
         {
             var mainPage = _page;
             if (mainPage == null)
