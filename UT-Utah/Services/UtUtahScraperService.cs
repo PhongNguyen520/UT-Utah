@@ -320,7 +320,8 @@ public class UtUtahScraperService
             popup = await popupTask;
             popup.SetDefaultTimeout(DownloadTimeoutMs);
 
-            await popup.WaitForLoadStateAsync(LoadState.NetworkIdle);
+            // Use DOMContentLoaded: BMI viewer keeps background requests, so NetworkIdle never fires on Apify/cloud
+            await popup.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
             // 2. Open Hamburger menu
             var toolbar = popup.Locator("#Toolbar").First;
