@@ -298,7 +298,7 @@ public class UtUtahScraperService
 
     /// <summary>
     /// Step 4: Opens Document Image Viewer popup and handles the PDF download.
-    /// Fixes the "timeout on 2nd record" issue by ensuring JS bindings are fully loaded before clicking.
+    /// Uses page+popup download listeners to catch files no matter which page triggers it (Apify headless).
     /// </summary>
     async Task TryDownloadPdfForDetailPageAsync(IPage page, string documentNumber, string recordingDate)
     {
@@ -310,25 +310,30 @@ public class UtUtahScraperService
         var fullPath = Path.Combine(dir, safeFileName);
 
         IPage? popup = null;
+        var downloadTcs = new TaskCompletionSource<IDownload>();
+
+        // Catch downloads on either detail page or popup (.NET has no Context.Download; we listen on both pages)
+        void OnDownload(object? sender, IDownload d) => downloadTcs.TrySetResult(d);
 
         try
         {
+            // Attach to detail page immediately so we catch download no matter which page fires it
+            page.Download += OnDownload;
+
             // 1. Open BMI Web Viewer popup
             var popupTask = page.WaitForPopupAsync(new PageWaitForPopupOptions { Timeout = 45_000 });
             await page.Locator("input[value=\"Document Image Viewer\"]").First.ClickAsync(new LocatorClickOptions { Timeout = 30_000 });
             popup = await popupTask;
             popup.SetDefaultTimeout(60_000);
 
-            // Wait for the HTML DOM
+            popup.Download += OnDownload;
+
             await popup.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
-            // CRITICAL FIX: Wait for the document image to appear.
-            // This guarantees that the server data has arrived and KnockoutJS is initializing the UI.
+            // Wait for document image so KnockoutJS bindings are active
             var firstDocImage = popup.Locator("img.lt-image").First;
             await firstDocImage.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 60_000 });
-
-            // Extra buffer to ensure KnockoutJS 'click' bindings are fully attached to the menu
-            await Task.Delay(3000);
+            await Task.Delay(2000);
 
             // 2. Open Hamburger menu
             var toolbar = popup.Locator("#Toolbar").First;
@@ -336,8 +341,6 @@ public class UtUtahScraperService
 
             var menuToggle = popup.Locator("#Toolbar a.dropdown-toggle[data-toggle=\"dropdown\"]").First;
             await menuToggle.ClickAsync();
-
-            // Wait for dropdown animation
             await Task.Delay(1500);
 
             // 3. Prepare to click "Download PDF"
@@ -345,16 +348,22 @@ public class UtUtahScraperService
             if (!await downloadLink.IsVisibleAsync())
                 downloadLink = popup.Locator("a:has-text('Download PDF')").First;
 
-            // 4. Click download and wait for the Playwright Download event
+            // 4. Click download and wait for the Download event (on either page)
             Console.WriteLine($"[UtUtah] Triggering download for {docId}...");
-            var downloadTask = popup.WaitForDownloadAsync(new PageWaitForDownloadOptions { Timeout = 60_000 });
-
             await downloadLink.ClickAsync(new LocatorClickOptions { Timeout = 30_000 });
 
-            var download = await downloadTask;
-            await download.SaveAsAsync(fullPath);
+            var completed = await Task.WhenAny(downloadTcs.Task, Task.Delay(60_000));
 
-            Console.WriteLine($"[UtUtah] Successfully saved PDF: {fullPath}");
+            if (completed == downloadTcs.Task)
+            {
+                var download = await downloadTcs.Task;
+                await download.SaveAsAsync(fullPath);
+                Console.WriteLine($"[UtUtah] Successfully saved PDF via Context: {fullPath}");
+            }
+            else
+            {
+                Console.WriteLine($"[UtUtah] PDF download timeout. No Context download event fired for DocID {docId}");
+            }
         }
         catch (Exception ex)
         {
@@ -362,6 +371,8 @@ public class UtUtahScraperService
         }
         finally
         {
+            page.Download -= OnDownload;
+            if (popup != null) popup.Download -= OnDownload;
             if (popup != null) try { await popup.CloseAsync(); } catch { }
         }
     }
