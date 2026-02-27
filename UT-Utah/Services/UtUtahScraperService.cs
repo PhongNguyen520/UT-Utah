@@ -298,7 +298,7 @@ public class UtUtahScraperService
 
     /// <summary>
     /// Step 4: Opens Document Image Viewer popup and handles the PDF download.
-    /// Listens for Download on both detail page and popup so we catch it regardless of which page Chromium assigns it to (fixes 2nd+ record on Apify).
+    /// Fixes the "timeout on 2nd record" issue by ensuring JS bindings are fully loaded before clicking.
     /// </summary>
     async Task TryDownloadPdfForDetailPageAsync(IPage page, string documentNumber, string recordingDate)
     {
@@ -310,9 +310,6 @@ public class UtUtahScraperService
         var fullPath = Path.Combine(dir, safeFileName);
 
         IPage? popup = null;
-        var downloadTcs = new TaskCompletionSource<IDownload>();
-
-        void OnDownload(object? sender, IDownload d) => downloadTcs.TrySetResult(d);
 
         try
         {
@@ -322,7 +319,16 @@ public class UtUtahScraperService
             popup = await popupTask;
             popup.SetDefaultTimeout(60_000);
 
+            // Wait for the HTML DOM
             await popup.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+
+            // CRITICAL FIX: Wait for the document image to appear.
+            // This guarantees that the server data has arrived and KnockoutJS is initializing the UI.
+            var firstDocImage = popup.Locator("img.lt-image").First;
+            await firstDocImage.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 60_000 });
+
+            // Extra buffer to ensure KnockoutJS 'click' bindings are fully attached to the menu
+            await Task.Delay(3000);
 
             // 2. Open Hamburger menu
             var toolbar = popup.Locator("#Toolbar").First;
@@ -330,32 +336,25 @@ public class UtUtahScraperService
 
             var menuToggle = popup.Locator("#Toolbar a.dropdown-toggle[data-toggle=\"dropdown\"]").First;
             await menuToggle.ClickAsync();
-            await Task.Delay(1000); // Give menu time to animate
+
+            // Wait for dropdown animation
+            await Task.Delay(1500);
 
             // 3. Prepare to click "Download PDF"
             var downloadLink = popup.Locator("a[data-bind*=\"showPdf\"]").First;
             if (!await downloadLink.IsVisibleAsync())
                 downloadLink = popup.Locator("a:has-text('Download PDF')").First;
 
-            // Attach on BOTH detail page and popup: Chromium may fire Download on either after the first record
-            page.Download += OnDownload;
-            popup.Download += OnDownload;
+            // 4. Click download and wait for the Playwright Download event
+            Console.WriteLine($"[UtUtah] Triggering download for {docId}...");
+            var downloadTask = popup.WaitForDownloadAsync(new PageWaitForDownloadOptions { Timeout = 60_000 });
 
-            // 4. Click and wait for Download event
             await downloadLink.ClickAsync(new LocatorClickOptions { Timeout = 30_000 });
 
-            var completed = await Task.WhenAny(downloadTcs.Task, Task.Delay(60_000));
+            var download = await downloadTask;
+            await download.SaveAsAsync(fullPath);
 
-            if (completed == downloadTcs.Task)
-            {
-                var download = await downloadTcs.Task;
-                await download.SaveAsAsync(fullPath);
-                Console.WriteLine($"[UtUtah] Successfully saved PDF via Download event: {fullPath}");
-            }
-            else
-            {
-                Console.WriteLine($"[UtUtah] PDF download timeout. No download event fired for DocID {docId}");
-            }
+            Console.WriteLine($"[UtUtah] Successfully saved PDF: {fullPath}");
         }
         catch (Exception ex)
         {
@@ -363,8 +362,6 @@ public class UtUtahScraperService
         }
         finally
         {
-            page.Download -= OnDownload;
-            if (popup != null) popup.Download -= OnDownload;
             if (popup != null) try { await popup.CloseAsync(); } catch { }
         }
     }
