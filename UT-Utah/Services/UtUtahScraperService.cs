@@ -34,6 +34,8 @@ public class UtUtahScraperService
     {
         input ??= new InputConfig();
 
+        await ApifyHelper.SetStatusMessageAsync("Starting UT-Utah scraper...");
+
         // Step 6: Checkpoint / state — resume from last processed date if present
         try
         {
@@ -44,6 +46,7 @@ public class UtUtahScraperService
                 {
                     var resumeStart = lastDate.AddDays(1).ToString("MM/dd/yyyy", CultureInfo.InvariantCulture);
                     input.StartDate = resumeStart;
+                    await ApifyHelper.SetStatusMessageAsync($"Resuming from checkpoint: StartDate set to {resumeStart}...");
                     Console.WriteLine($"[UtUtah] Resuming from checkpoint: StartDate set to {resumeStart} (last processed: {state.LastProcessedDate})");
                 }
             }
@@ -53,95 +56,117 @@ public class UtUtahScraperService
             Console.WriteLine($"[UtUtah] State load failed (continuing with full range): {ex.Message}");
         }
 
-        // 1. Init Playwright and Browser
-        await InitBrowserAsync();
-
-        _page = await _context!.NewPageAsync();
-        _page.SetDefaultTimeout(30_000);
-
-        // 2. Navigate to Utah County Recorder start URL
-        await _page.GotoAsync(StartUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-        await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-
-        // 3. Click "Document Recording Search" link (href="RecordingsForm.asp")
-        var docRecordingLink = _page.Locator($"a[href=\"{RecordingsFormPath}\"]").First;
-        await docRecordingLink.ClickAsync();
-        await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-
-        // 4. Locate form#form2 (action="RecordingsDate.asp"), fill Start Date and End Date
-        var form2 = _page.Locator($"#{Form2Id}");
-        await form2.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
-
-        var startDateInput = _page.Locator($"#{InputStartDateId}");
-        var endDateInput = _page.Locator($"#{InputEndDateId}");
-        await startDateInput.FillAsync(NormalizeDate(input.StartDate));
-        await endDateInput.FillAsync(NormalizeDate(input.EndDate));
-
-        // 5. Click submit button inside #form2 (name="Submit3", value="  Search  ")
-        var submitBtn = form2.Locator($"input[name=\"{SubmitButtonName}\"][type=\"submit\"]");
-        await submitBtn.ClickAsync();
-
-        // 6. Wait for the search results page to load completely
-        await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-
-        // ——— Step 2: Pagination & Extracting Record Links ———
-        var allDetailLinks = await PaginateAndCollectDetailLinksAsync();
-        Console.WriteLine($"[UtUtah] Total detail links collected: {allDetailLinks.Count}");
-
-        // TEST: limit to 5 records for Apify testing
-        const int TestLimit = 5;
-        var linksToProcess = allDetailLinks.Take(TestLimit).ToList();
-        if (allDetailLinks.Count > TestLimit)
-            Console.WriteLine($"[UtUtah] Limiting to {TestLimit} records for test (total {allDetailLinks.Count} skipped).");
-
-        // ——— Step 3: For each detail link, scrape one document, upload PDF to KV, push DocumentRecord to Dataset ———
-        foreach (var relativeUrl in linksToProcess)
+        try
         {
-            var fullUrl = ResolveDetailUrl(relativeUrl);
-            var detailPage = await _context!.NewPageAsync();
-            detailPage.SetDefaultTimeout(60_000);
+            // 1. Init Playwright and Browser
+            await InitBrowserAsync();
 
-            try
+            _page = await _context!.NewPageAsync();
+            _page.SetDefaultTimeout(30_000);
+
+            // 2. Navigate to Utah County Recorder start URL
+            await _page.GotoAsync(StartUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+
+            // 3. Click "Document Recording Search" link (href="RecordingsForm.asp")
+            var docRecordingLink = _page.Locator($"a[href=\"{RecordingsFormPath}\"]").First;
+            await docRecordingLink.ClickAsync();
+            await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+
+            // 4. Locate form#form2 (action="RecordingsDate.asp"), fill Start Date and End Date
+            var form2 = _page.Locator($"#{Form2Id}");
+            await form2.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible });
+
+            var startDateInput = _page.Locator($"#{InputStartDateId}");
+            var endDateInput = _page.Locator($"#{InputEndDateId}");
+            await ApifyHelper.SetStatusMessageAsync($"Searching dates: {input.StartDate} to {input.EndDate}...");
+            await startDateInput.FillAsync(NormalizeDate(input.StartDate));
+            await endDateInput.FillAsync(NormalizeDate(input.EndDate));
+
+            // 5. Click submit button inside #form2 (name="Submit3", value="  Search  ")
+            var submitBtn = form2.Locator($"input[name=\"{SubmitButtonName}\"][type=\"submit\"]");
+            await submitBtn.ClickAsync();
+
+            // 6. Wait for the search results page to load completely
+            await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+
+            // ——— Step 2: Pagination & Extracting Record Links ———
+            var allDetailLinks = await PaginateAndCollectDetailLinksAsync();
+            Console.WriteLine($"[UtUtah] Total detail links collected: {allDetailLinks.Count}");
+
+            if (allDetailLinks.Count == 0)
             {
-                await detailPage.GotoAsync(fullUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                await ApifyHelper.SetStatusMessageAsync("Finished: No records found for the given date range.", isTerminal: true);
+                return;
+            }
 
-                var record = await ExtractAndMapDetailPageAsync(detailPage);
+            await ApifyHelper.SetStatusMessageAsync($"Found {allDetailLinks.Count} records. Preparing to extract...");
 
-                if (!string.IsNullOrEmpty(record.EntryNumber))
+            // TEST: limit to 5 records for Apify testing
+            const int TestLimit = 5;
+            var linksToProcess = allDetailLinks.Take(TestLimit).ToList();
+            if (allDetailLinks.Count > TestLimit)
+                Console.WriteLine($"[UtUtah] Limiting to {TestLimit} records for test (total {allDetailLinks.Count} skipped).");
+
+            // ——— Step 3: For each detail link, scrape one document, upload PDF to KV, push DocumentRecord to Dataset ———
+            for (var i = 0; i < linksToProcess.Count; i++)
+            {
+                await ApifyHelper.SetStatusMessageAsync($"Processing record {i + 1} of {linksToProcess.Count}...");
+
+                var relativeUrl = linksToProcess[i];
+                var fullUrl = ResolveDetailUrl(relativeUrl);
+                var detailPage = await _context!.NewPageAsync();
+                detailPage.SetDefaultTimeout(60_000);
+
+                try
                 {
-                    var pdfUrl = await TryDownloadPdfForDetailPageAsync(detailPage, record.EntryNumber, record.Recorded);
-                    record.PdfUrl = pdfUrl ?? "";
+                    await detailPage.GotoAsync(fullUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
 
-                    await ApifyHelper.PushSingleDataAsync(record);
-                    Console.WriteLine($"[UtUtah] Pushed data for {record.EntryNumber} to Dataset.");
+                    var record = await ExtractAndMapDetailPageAsync(detailPage);
 
-                    if (DateTime.TryParse(record.Recorded, CultureInfo.InvariantCulture, DateTimeStyles.None, out var recordDate))
+                    if (!string.IsNullOrEmpty(record.EntryNumber))
                     {
-                        try
+                        var pdfUrl = await TryDownloadPdfForDetailPageAsync(detailPage, record.EntryNumber, record.Recorded);
+                        record.PdfUrl = pdfUrl ?? "";
+
+                        await ApifyHelper.PushSingleDataAsync(record);
+                        Console.WriteLine($"[UtUtah] Pushed data for {record.EntryNumber} to Dataset.");
+
+                        if (DateTime.TryParse(record.Recorded, CultureInfo.InvariantCulture, DateTimeStyles.None, out var recordDate))
                         {
-                            await ApifyHelper.SetValueAsync("STATE", new StateModel { LastProcessedDate = recordDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) });
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[UtUtah] State save failed: {ex.Message}");
+                            try
+                            {
+                                await ApifyHelper.SetValueAsync("STATE", new StateModel { LastProcessedDate = recordDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) });
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[UtUtah] State save failed: {ex.Message}");
+                            }
                         }
                     }
                 }
+                catch (Exception ex) when (ex.Message.Contains("has been closed", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine("[UtUtah] Browser or page was closed; stopping loop.");
+                    try { await detailPage.CloseAsync(); } catch { }
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[UtUtah] Error processing detail page {fullUrl}: {ex.Message}");
+                }
+                finally
+                {
+                    try { await detailPage.CloseAsync(); } catch { }
+                }
             }
-            catch (Exception ex) when (ex.Message.Contains("has been closed", StringComparison.OrdinalIgnoreCase))
-            {
-                Console.WriteLine("[UtUtah] Browser or page was closed; stopping loop.");
-                try { await detailPage.CloseAsync(); } catch { }
-                break;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[UtUtah] Error processing detail page {fullUrl}: {ex.Message}");
-            }
-            finally
-            {
-                try { await detailPage.CloseAsync(); } catch { }
-            }
+
+            await ApifyHelper.SetStatusMessageAsync("Success: All records exported to Dataset.", isTerminal: true);
+        }
+        catch (Exception ex)
+        {
+            await ApifyHelper.SetStatusMessageAsync($"Fatal Error: {ex.Message}", isTerminal: true);
+            throw;
         }
     }
 

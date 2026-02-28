@@ -2296,11 +2296,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\26_02_2026\\UT-Utah\\UT-Utah\\UT-Utah.csproj",
+      "projectUniqueName": "D:\\27_02_2026\\UT-Utah\\UT-Utah\\UT-Utah.csproj",
       "projectName": "UT-Utah",
-      "projectPath": "D:\\26_02_2026\\UT-Utah\\UT-Utah\\UT-Utah.csproj",
+      "projectPath": "D:\\27_02_2026\\UT-Utah\\UT-Utah\\UT-Utah.csproj",
       "packagesPath": "C:\\Users\\ACER\\.nuget\\packages\\",
-      "outputPath": "D:\\26_02_2026\\UT-Utah\\UT-Utah\\obj\\",
+      "outputPath": "D:\\27_02_2026\\UT-Utah\\UT-Utah\\obj\\",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "C:\\Users\\ACER\\AppData\\Roaming\\NuGet\\NuGet.Config",

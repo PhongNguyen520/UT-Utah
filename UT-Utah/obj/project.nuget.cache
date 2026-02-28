@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "gt7PkCTlt5A=",
+  "dgSpecHash": "PXKAwW8b7Gs=",
   "success": true,
-  "projectFilePath": "D:\\26_02_2026\\UT-Utah\\UT-Utah\\UT-Utah.csproj",
+  "projectFilePath": "D:\\27_02_2026\\UT-Utah\\UT-Utah\\UT-Utah.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\ACER\\.nuget\\packages\\microsoft.bcl.asyncinterfaces\\6.0.0\\microsoft.bcl.asyncinterfaces.6.0.0.nupkg.sha512",
     "C:\\Users\\ACER\\.nuget\\packages\\microsoft.extensions.configuration\\8.0.0\\microsoft.extensions.configuration.8.0.0.nupkg.sha512",
