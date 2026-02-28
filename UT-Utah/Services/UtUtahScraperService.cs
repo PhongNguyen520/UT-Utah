@@ -88,8 +88,14 @@ public class UtUtahScraperService
         var allDetailLinks = await PaginateAndCollectDetailLinksAsync();
         Console.WriteLine($"[UtUtah] Total detail links collected: {allDetailLinks.Count}");
 
+        // TEST: limit to 5 records for Apify testing
+        const int TestLimit = 5;
+        var linksToProcess = allDetailLinks.Take(TestLimit).ToList();
+        if (allDetailLinks.Count > TestLimit)
+            Console.WriteLine($"[UtUtah] Limiting to {TestLimit} records for test (total {allDetailLinks.Count} skipped).");
+
         // ——— Step 3: For each detail link, scrape one document, upload PDF to KV, push DocumentRecord to Dataset ———
-        foreach (var relativeUrl in allDetailLinks)
+        foreach (var relativeUrl in linksToProcess)
         {
             var fullUrl = ResolveDetailUrl(relativeUrl);
             var detailPage = await _context!.NewPageAsync();
