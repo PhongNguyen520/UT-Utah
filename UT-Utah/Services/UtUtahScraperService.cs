@@ -56,12 +56,17 @@ public class UtUtahScraperService
             Console.WriteLine($"[UtUtah] State load failed (continuing with full range): {ex.Message}");
         }
 
-        try
+        int maxRetries = 3;
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            // 1. Init Playwright and Browser
-            await InitBrowserAsync();
+            try
+            {
+                await ApifyHelper.SetStatusMessageAsync($"Attempt {attempt} of {maxRetries}...");
 
-            _page = await _context!.NewPageAsync();
+                // 1. Init Playwright and Browser
+                await InitBrowserAsync();
+
+                _page = await _context!.NewPageAsync();
             _page.SetDefaultTimeout(30_000);
 
             // 2. Navigate to Utah County Recorder start URL
@@ -162,11 +167,20 @@ public class UtUtahScraperService
             }
 
             await ApifyHelper.SetStatusMessageAsync("Success: All records exported to Dataset.", isTerminal: true);
-        }
-        catch (Exception ex)
-        {
-            await ApifyHelper.SetStatusMessageAsync($"Fatal Error: {ex.Message}", isTerminal: true);
-            throw;
+            break;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Attempt {attempt}] Error: {ex.Message}");
+                await StopAsync();
+                if (attempt == maxRetries)
+                {
+                    await ApifyHelper.SetStatusMessageAsync($"Fatal Error after {maxRetries} attempts: {ex.Message}", isTerminal: true);
+                    throw;
+                }
+                await ApifyHelper.SetStatusMessageAsync($"Attempt {attempt} failed. Retrying in 10 seconds...");
+                await Task.Delay(10000);
+            }
         }
     }
 
