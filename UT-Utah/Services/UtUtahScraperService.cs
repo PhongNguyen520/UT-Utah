@@ -100,6 +100,10 @@ public class UtUtahScraperService
             if (allDetailLinks.Count > TestLimit)
                 Console.WriteLine($"[UtUtah] Limiting to {TestLimit} records for test (total {allDetailLinks.Count} skipped).");
 
+            var total = linksToProcess.Count;
+            var succeeded = 0;
+            var failed = 0;
+
             for (var i = 0; i < linksToProcess.Count; i++)
             {
                 await ApifyHelper.SetStatusMessageAsync($"Processing record {i + 1} of {linksToProcess.Count}...");
@@ -122,17 +126,24 @@ public class UtUtahScraperService
 
                         await ApifyHelper.PushSingleDataAsync(record);
                         Console.WriteLine($"[UtUtah] Pushed data for {record.EntryNumber} to Dataset.");
+                        succeeded++;
+                    }
+                    else
+                    {
+                        failed++;
                     }
                 }
                 catch (Exception ex) when (ex.Message.Contains("has been closed", StringComparison.OrdinalIgnoreCase))
                 {
                     Console.WriteLine("[UtUtah] Browser or page was closed; stopping loop.");
+                    failed += linksToProcess.Count - i;
                     try { await detailPage.CloseAsync(); } catch { }
                     break;
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[UtUtah] Error processing detail page {fullUrl}: {ex.Message}");
+                    failed++;
                 }
                 finally
                 {
@@ -140,7 +151,7 @@ public class UtUtahScraperService
                 }
             }
 
-            await ApifyHelper.SetStatusMessageAsync("Success: All records exported to Dataset.", isTerminal: true);
+            await ApifyHelper.SetStatusMessageAsync($"Finished! Total {total} requests: {succeeded} succeeded, {failed} failed.", isTerminal: true);
         }
         catch (Exception ex)
         {
