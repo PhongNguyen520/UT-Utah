@@ -95,10 +95,7 @@ public class UtUtahScraperService
 
             await ApifyHelper.SetStatusMessageAsync($"Found {allDetailLinks.Count} records. Preparing to extract...");
 
-            const int TestLimit = 5;
-            var linksToProcess = allDetailLinks.Take(TestLimit).ToList();
-            if (allDetailLinks.Count > TestLimit)
-                Console.WriteLine($"[UtUtah] Limiting to {TestLimit} records for test (total {allDetailLinks.Count} skipped).");
+            var linksToProcess = allDetailLinks;
 
             var total = linksToProcess.Count;
             var succeeded = 0;
